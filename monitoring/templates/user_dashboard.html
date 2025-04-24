@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>User Dashboard - Proctoring System</title>
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4.1633559619/face_mesh.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils@0.3.1633559619/drawing_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1633559619/camera_utils.js"></script>
+    <style>
+        body {
+            padding: 20px;
+        }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        .video-container {
+            width: 640px;
+            margin: 0 auto;
+        }
+        .webcam-feed {
+            width: 640px;
+            height: 480px;
+            border: 1px solid #ddd;
+            background-color: #eee;
+        }
+        .status-panel {
+            margin-top: 20px;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+        .alert-message {
+            padding: 15px;
+            background-color: #f8d7da;
+            color: #721c24;
+            border-radius: 5px;
+            margin-top: 15px;
+            display: none;
+        }
+        .error-message {
+            padding: 15px;
+            background-color: #f8d7da;
+            color: #721c24;
+            border-radius: 5px;
+            margin-bottom: 15px;
+        }
+        .alerts-container {
+            margin-top: 20px;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        .alert-item {
+            padding: 10px;
+            margin-bottom: 10px;
+            border-radius: 5px;
+            animation: fadeIn 0.5s;
+        }
+        .alert-item.warning {
+            background-color: #fff3cd;
+            border: 1px solid #ffeeba;
+            color: #856404;
+        }
+        .alert-item.danger {
+            background-color: #f8d7da;
+            border: 1px solid #f5c6cb;
+            color: #721c24;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(-10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>User Dashboard</h1>
+            <div>
+                <span class="mr-3">Welcome, {{ username }}</span>
+                <a href="{{ url_for('logout') }}" class="btn btn-danger">Logout</a>
+            </div>
+        </div>
+        
+        <div id="errorContainer" style="display:none;" class="error-message"></div>
+        
+        <div class="video-container">
+            <video id="webcamFeed" class="webcam-feed" autoplay playsinline></video>
+            
+            <div class="status-panel">
+                <h4>Status</h4>
+                <p>Connection: <span id="connectionStatus">Connecting...</span></p>
+                <p>Monitoring: <span id="monitoringStatus">Not being monitored</span></p>
+            </div>
+            
+            <div id="alertMessage" class="alert-message"></div>
+
+            <div class="alerts-container" id="alertsContainer">
+                <h4>Real-time Alerts</h4>
+                <div id="alertsList"></div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        const socket = io();
+        const webcamFeed = document.getElementById('webcamFeed');
+        const connectionStatus = document.getElementById('connectionStatus');
+        const monitoringStatus = document.getElementById('monitoringStatus');
+        const alertMessage = document.getElementById('alertMessage');
+        const errorContainer = document.getElementById('errorContainer');
+        const alertsList = document.getElementById('alertsList');
+        
+        let stream = null;
+        let isStreaming = false;
+        let canvas = document.createElement('canvas');
+        let context = canvas.getContext('2d');
+        
+        // Function to add a new alert to the alerts list
+        function addAlert(message, type = 'warning') {
+            const alertDiv = document.createElement('div');
+            alertDiv.className = `alert-item ${type}`;
+            alertDiv.innerHTML = `
+                <div class="d-flex justify-content-between align-items-center">
+                    <span>${message}</span>
+                    <small>${new Date().toLocaleTimeString()}</small>
+                </div>
+            `;
+            
+            alertsList.insertBefore(alertDiv, alertsList.firstChild);
+            
+            // Remove alert after 30 seconds
+            setTimeout(() => {
+                alertDiv.style.opacity = '0';
+                setTimeout(() => alertDiv.remove(), 500);
+            }, 30000);
+        }
+
+        // Function to handle alerts from video processing
+        function handleAlerts(alerts) {
+            if (alerts && alerts.length > 0) {
+                const alertsArray = alerts.split(', ');
+                alertsArray.forEach(alert => {
+                    addAlert(alert, 'warning');
+                });
+            }
+        }
+        
+        // Modified sendFramesFallback to handle alerts
+        function sendFramesFallback() {
+            if (!isStreaming || !stream) return;
+            
+            try {
+                context.drawImage(webcamFeed, 0, 0, canvas.width, canvas.height);
+                const imageData = canvas.toDataURL('image/jpeg', 0.7);
+                
+                socket.emit('video_frame', {
+                    image: imageData,
+                    timestamp: new Date().toISOString()
+                });
+            } catch (err) {
+                console.error('Error sending frame:', err);
+            }
+            
+            if (isStreaming) {
+                setTimeout(sendFramesFallback, 100);
+            }
+        }
+        
+        // Handle video frame response with alerts
+        socket.on('video_frame_response', function(data) {
+            if (data.alerts) {
+                handleAlerts(data.alerts);
+            }
+        });
+        
+        // Handle suspicious behavior notification
+        socket.on('suspicious_behavior_detected', function(data) {
+            addAlert(`Warning: You have been flagged by proctor - ${data.reason}`, 'danger');
+        });
+        
+        // Rest of your existing socket event handlers...
+        socket.on('connect', function() {
+            console.log('Connected to server');
+            setupWebcam();
+        });
+        
+        socket.on('start_video_stream', function() {
+            startVideoStream();
+        });
+        
+        socket.on('stop_video_stream', function() {
+            stopVideoStream();
+        });
+        
+        socket.on('disconnect', function() {
+            connectionStatus.textContent = 'Disconnected';
+            connectionStatus.style.color = 'red';
+            stopVideoStream();
+            addAlert('Connection lost to server', 'danger');
+        });
+        
+        // Setup webcam access
+        async function setupWebcam() {
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({
+                    video: {
+                        width: 640,
+                        height: 480
+                    },
+                    audio: false
+                });
+                
+                webcamFeed.srcObject = stream;
+                canvas.width = 640;
+                canvas.height = 480;
+                
+                connectionStatus.textContent = 'Connected';
+                connectionStatus.style.color = 'green';
+                
+            } catch (err) {
+                showError('Error accessing webcam: ' + err.message);
+            }
+        }
+        
+        // Start video streaming
+        function startVideoStream() {
+            if (!stream) {
+                showError('Cannot start streaming: No camera stream available');
+                return;
+            }
+            
+            isStreaming = true;
+            monitoringStatus.textContent = 'Currently being monitored';
+            monitoringStatus.style.color = 'red';
+            addAlert('Proctoring session started', 'warning');
+            
+            sendFramesFallback();
+        }
+        
+        // Stop video streaming
+        function stopVideoStream() {
+            isStreaming = false;
+            monitoringStatus.textContent = 'Not being monitored';
+            monitoringStatus.style.color = 'black';
+            addAlert('Proctoring session ended', 'warning');
+        }
+        
+        // Function to show errors
+        function showError(message) {
+            errorContainer.innerText = message;
+            errorContainer.style.display = 'block';
+            connectionStatus.textContent = 'Error';
+            connectionStatus.style.color = 'red';
+            addAlert(message, 'danger');
+            console.error(message);
+        }
+    </script>
+</body>
+</html>
